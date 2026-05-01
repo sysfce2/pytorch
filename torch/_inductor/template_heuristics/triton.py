@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import logging
 import math
 import os
 from functools import partial
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
 
 else:
     from torch._inductor.runtime.triton_compat import Config as TritonConfig
+log = logging.getLogger(__name__)
 
 
 # Gemm Configs
@@ -1084,6 +1086,14 @@ class BaseConfigHeuristic(metaclass=BaseHeuristicSingleton):
         return partial(self.preprocess_mm_configs, configs=self.mm_configs)
 
     def get_exhaustive_mm_configs(self) -> partial[Generator[TritonConfig, None, None]]:
+        """Get exhaustive MM configs for origami optimization.
+
+        Note: When these configs are used with origami (on ROCm with
+        config.rocm.origami=True and max_autotune_gemm_search_space="DEFAULT"),
+        origami will filter them to the top-K configurations. Origami currently
+        only supports Triton backend, so only Triton-compatible configs will be
+        used. ATEN backend is excluded from origami search space.
+        """
         return partial(self.preprocess_mm_configs, configs=self.exhaustive_configs)
 
     def get_conv_configs(self) -> partial[Generator[TritonConfig, None, None]]:
@@ -2058,27 +2068,141 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
 
         # Extract dtype and device_type from kernel_inputs
         dtype = kernel_inputs.dtype()
-
+        device = kernel_inputs.device()
+        strides = kernel_inputs.strides_symbolic()
+        a_stride = strides[kernel_inputs._mat1_idx]
+        b_stride = strides[kernel_inputs._mat2_idx]
         # Get the appropriate config generator
         configs = self._get_config_generator()
-
         # Generate and process configs
-        for c in configs(
-            m,
-            n,
-            k,
-            dtype_size=dtype.itemsize,
-            op_name=op_name,
-            **kwargs,
+        if (
+            config.max_autotune
+            and (torch.version.hip is not None)
+            and config.rocm.origami
+            and config.max_autotune_gemm_search_space == "DEFAULT"
         ):
-            template_kwargs = self._convert_config_to_template_kwargs(
-                c,
+            try:
+                import origami
+            except ImportError:
+                log.warning(
+                    "Origami not imported, falling back to regular config generator"
+                )
+                origami = None
+            if origami is not None:
+                origami_cfg_gen = self.get_exhaustive_mm_configs()
+                allcfgs = origami_cfg_gen(
+                    m, n, k, dtype_size=dtype.itemsize, op_name=op_name
+                )
+                selector = origami.OrigamiMatmulSelector(
+                    allcfgs,
+                    m,
+                    n,
+                    k,
+                    dtype,
+                    dtype,
+                    dtype,
+                    device,
+                    a_stride,
+                    b_stride,
+                )
+                topk_results = origami.select_topk_configs(
+                    selector._problem,
+                    selector._hardware,
+                    selector._configs,
+                    config.rocm.origami_topk,
+                )
+                seen = OrderedSet()
+                for result in topk_results:
+                    cfg = result.config
+                    key = (cfg.mt.m, cfg.mt.n, cfg.mt.k, cfg.occupancy)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    grid = origami.select_grid_size(
+                        selector._problem,
+                        selector._hardware,
+                        cfg,
+                        origami.grid_selection_t.data_parallel,
+                        selector._hardware.N_CU,
+                    )
+                    wgm_result = origami.select_workgroup_mapping(
+                        selector._problem,
+                        selector._hardware,
+                        cfg,
+                        grid,
+                    )
+                    tile_area = cfg.mt.m * cfg.mt.n
+                    warp_size = torch.cuda.get_device_properties(device).warp_size
+                    mfma_dim = 16
+                    max_warps = 2 * selector._hardware.parallel_mi_cu
+                    num_warps = min(
+                        max_warps,
+                        max(1, tile_area // (mfma_dim * warp_size)),
+                    )
+                    # Create TritonConfig from origami result and convert to template kwargs
+                    triton_config = self.triton_config(  # pyright: ignore[attr-defined]
+                        num_stages=2,
+                        num_warps=num_warps,
+                        BLOCK_M=cfg.mt.m,
+                        BLOCK_N=cfg.mt.n,
+                        BLOCK_K=cfg.mt.k,
+                        GROUP_M=wgm_result.wgm,
+                        waves_per_eu=cfg.occupancy,
+                    )
+                    template_kwargs = self._convert_config_to_template_kwargs(
+                        triton_config,
+                        m,
+                        n,
+                        k,
+                        kernel_inputs.out_dtype(),
+                    )
+                    yield template_kwargs
+
+        elif (
+            config.max_autotune
+            and (torch.version.hip is not None)
+            and config.rocm.origami
+            and config.max_autotune_gemm_search_space == "EXHAUSTIVE"
+        ):
+            log.warning(
+                "Origami is enabled but not used: search space is set to EXHAUSTIVE. "
+                "Origami only operates with DEFAULT search space. "
+                "Set max_autotune_gemm_search_space='DEFAULT' to enable origami optimization."
+            )
+            for c in configs(
                 m,
                 n,
                 k,
-                kernel_inputs.out_dtype(),
-            )
-            yield template_kwargs
+                dtype_size=dtype.itemsize,
+                op_name=op_name,
+                **kwargs,
+            ):
+                template_kwargs = self._convert_config_to_template_kwargs(
+                    c,
+                    m,
+                    n,
+                    k,
+                    kernel_inputs.out_dtype(),
+                )
+                yield template_kwargs
+
+        else:
+            for c in configs(
+                m,
+                n,
+                k,
+                dtype_size=dtype.itemsize,
+                op_name=op_name,
+                **kwargs,
+            ):
+                template_kwargs = self._convert_config_to_template_kwargs(
+                    c,
+                    m,
+                    n,
+                    k,
+                    kernel_inputs.out_dtype(),
+                )
+                yield template_kwargs
 
     def _convert_config_to_template_kwargs(
         self,
