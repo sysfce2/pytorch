@@ -2113,6 +2113,10 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                     config.rocm.origami_topk,
                 )
                 seen = OrderedSet()
+                # Collect origami-selected configs into a list before filtering
+                origami_configs: list[BaseConfig] = []
+                origami_triton_configs: dict[int, tuple[Any, Any]] = {}
+
                 for result in topk_results:
                     cfg = result.config
                     key = (cfg.mt.m, cfg.mt.n, cfg.mt.k, cfg.occupancy)
@@ -2140,15 +2144,43 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                         max_warps,
                         max(1, tile_area // (mfma_dim * warp_size)),
                     )
-                    # Create TritonConfig from origami result and convert to template kwargs
-                    triton_config = self.triton_config(  # pyright: ignore[attr-defined]
+                    # Create BaseConfig from origami result for filtering
+                    base_config = GemmConfig(
+                        block_m=cfg.mt.m,
+                        block_n=cfg.mt.n,
+                        block_k=cfg.mt.k,
                         num_stages=2,
                         num_warps=num_warps,
-                        BLOCK_M=cfg.mt.m,
-                        BLOCK_N=cfg.mt.n,
-                        BLOCK_K=cfg.mt.k,
-                        GROUP_M=wgm_result.wgm,
-                        waves_per_eu=cfg.occupancy,
+                        group_m=wgm_result.wgm,
+                    )
+                    origami_configs.append(base_config)
+                    # Store triton config and its parameters for later conversion
+                    origami_triton_configs[id(base_config)] = (
+                        cfg.occupancy,
+                        wgm_result.wgm,
+                    )
+
+                # Filter the collected configs
+                filtered_configs = self._filter_configs(origami_configs)
+
+                # Convert filtered configs to template kwargs and yield
+                for filtered_config in filtered_configs:
+                    # Retrieve stored origami parameters
+                    origami_params = origami_triton_configs.get(id(filtered_config))
+                    if origami_params is None:
+                        # If not found, skip this config (shouldn't happen)
+                        continue
+                    occupancy, group_m = origami_params
+
+                    # Create TritonConfig from filtered config
+                    triton_config = self.triton_config(  # pyright: ignore[attr-defined]
+                        num_stages=filtered_config.num_stages,
+                        num_warps=filtered_config.num_warps,
+                        BLOCK_M=filtered_config.block_m,
+                        BLOCK_N=filtered_config.block_n,
+                        BLOCK_K=filtered_config.block_k,
+                        GROUP_M=group_m,
+                        waves_per_eu=occupancy,
                     )
                     template_kwargs = self._convert_config_to_template_kwargs(
                         triton_config,
