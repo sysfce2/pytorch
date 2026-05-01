@@ -2078,7 +2078,7 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
             and config.max_autotune_gemm_search_space == "DEFAULT"
         ):
             try:
-                import origami
+                import origami  # type: ignore[import]
             except ImportError:
                 log.warning(
                     "Origami not imported, falling back to regular config generator"
