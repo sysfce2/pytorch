@@ -2191,35 +2191,19 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                     )
                     yield template_kwargs
 
-        elif (
-            config.max_autotune
-            and (torch.version.hip is not None)
-            and config.rocm.origami
-            and config.max_autotune_gemm_search_space == "EXHAUSTIVE"
-        ):
-            log.warning(
-                "Origami is enabled but not used: search space is set to EXHAUSTIVE. "
-                "Origami only operates with DEFAULT search space. "
-                "Set max_autotune_gemm_search_space='DEFAULT' to enable origami optimization."
-            )
-            for c in configs(
-                m,
-                n,
-                k,
-                dtype_size=dtype.itemsize,
-                op_name=op_name,
-                **kwargs,
-            ):
-                template_kwargs = self._convert_config_to_template_kwargs(
-                    c,
-                    m,
-                    n,
-                    k,
-                    kernel_inputs.out_dtype(),
-                )
-                yield template_kwargs
-
         else:
+            # Warn if origami is enabled but not used due to EXHAUSTIVE search space
+            if (
+                config.max_autotune
+                and (torch.version.hip is not None)
+                and config.rocm.origami
+                and config.max_autotune_gemm_search_space == "EXHAUSTIVE"
+            ):
+                log.warning(
+                    "Origami is enabled but not used: search space is set to EXHAUSTIVE. "
+                    "Origami only operates with DEFAULT search space. "
+                    "Set max_autotune_gemm_search_space='DEFAULT' to enable origami optimization."
+                )
             for c in configs(
                 m,
                 n,
