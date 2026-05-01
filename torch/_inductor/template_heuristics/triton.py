@@ -2068,10 +2068,6 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
 
         # Extract dtype and device_type from kernel_inputs
         dtype = kernel_inputs.dtype()
-        device = kernel_inputs.device()
-        strides = kernel_inputs.strides_symbolic()
-        a_stride = strides[kernel_inputs._mat1_idx]
-        b_stride = strides[kernel_inputs._mat2_idx]
         # Get the appropriate config generator
         configs = self._get_config_generator()
         # Generate and process configs
@@ -2089,6 +2085,11 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                 )
                 origami = None
             if origami is not None:
+                # Extract device and strides for origami GEMM
+                device = kernel_inputs.device()
+                strides = kernel_inputs.strides_symbolic()
+                a_stride = strides[kernel_inputs._mat1_idx]
+                b_stride = strides[kernel_inputs._mat2_idx]
                 origami_cfg_gen = self.get_exhaustive_mm_configs()
                 allcfgs = origami_cfg_gen(
                     m, n, k, dtype_size=dtype.itemsize, op_name=op_name
