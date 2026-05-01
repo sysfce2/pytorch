@@ -18,4 +18,12 @@ _log_handlers: dict[str, logging.Handler] = {
 
 def get_logging_handler(destination: str = "null") -> logging.Handler:
     global _log_handlers
+    if destination not in _log_handlers:
+        logging.getLogger(__name__).warning(
+            "Unknown event log handler %r, falling back to 'null'. "
+            "Available handlers: %s",
+            destination,
+            list(_log_handlers.keys()),
+        )
+        destination = "null"
     return _log_handlers[destination]
