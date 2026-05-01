@@ -2530,8 +2530,8 @@ class BaseScaledMMConfigMixin(MMTemplateConfigMixin):
             kernel_inputs, op_name, **kwargs
         ):
             # Add scaled MM-specific options (moved from mm_common.scaled_mm_options)
-            # Override accumulator type for scaled MM
-            template_kwargs["ACC_TYPE"] = "tl.float32"
+            # Override accumulator type for scaled MM using dynamic type resolution
+            template_kwargs["ACC_TYPE"] = self._get_acc_type(kernel_inputs.out_dtype())
 
             yield template_kwargs
 
