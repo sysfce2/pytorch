@@ -52,7 +52,7 @@ from torch._export.serde.serialize import (
 )
 from torch._higher_order_ops.torchbind import enable_torchbind_tracing
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
-from torch.export import Dim, export, load, save, unflatten
+from torch.export import Dim, export, load, save, unflatten, unsafe_export_save_load
 from torch.export.pt2_archive.constants import ARCHIVE_VERSION_PATH
 from torch.fx.experimental.symbolic_shapes import is_concrete_int, ValueRanges
 from torch.testing._internal.common_utils import (
@@ -2577,9 +2577,10 @@ class TestPredispatchSerialization(TestCase):
         self.assertIn("_jvp_decrement_nesting", graph_str)
 
         buffer = io.BytesIO()
-        torch.export.save(ep, buffer)
-        buffer.seek(0)
-        loaded_ep = torch.export.load(buffer)
+        with unsafe_export_save_load():
+            torch.export.save(ep, buffer)
+            buffer.seek(0)
+            loaded_ep = torch.export.load(buffer)
 
         loaded_graph_str = str(loaded_ep.graph)
         self.assertIn("_jvp_increment_nesting", loaded_graph_str)
@@ -2617,9 +2618,10 @@ class TestPredispatchSerialization(TestCase):
         self.assertIn("_vmap_decrement_nesting", graph_str)
 
         buffer = io.BytesIO()
-        torch.export.save(ep, buffer)
-        buffer.seek(0)
-        loaded_ep = torch.export.load(buffer)
+        with unsafe_export_save_load():
+            torch.export.save(ep, buffer)
+            buffer.seek(0)
+            loaded_ep = torch.export.load(buffer)
 
         # Verify predispatch nodes survive round-trip
         loaded_graph_str = str(loaded_ep.graph)
@@ -2629,6 +2631,35 @@ class TestPredispatchSerialization(TestCase):
         exp_out = ep.module()(*inp)
         actual_out = loaded_ep.module()(*inp)
         self.assertTrue(torch.allclose(exp_out, actual_out))
+
+    def test_callable_serialization_blocked_by_default(self):
+        """Serializing callable targets should fail without unsafe_export_save_load()."""
+
+        class JVP(torch.nn.Module):
+            def foo(self, x, r, t) -> torch.Tensor:
+                return x - 0.1 * r + 0.1 * t
+
+            def forward(self, x, y, r, t, z, o) -> tuple[torch.Tensor, torch.Tensor]:
+                return torch.func.jvp(
+                    self.foo,
+                    (x, r, t),
+                    (y, z, o),
+                )
+
+        inp = (
+            torch.rand(2, 4),
+            torch.rand(2, 4),
+            torch.rand(2, 1),
+            torch.rand(2, 1),
+            torch.zeros(2, 1),
+            torch.ones(2, 1),
+        )
+
+        ep = export(JVP(), inp, strict=False)
+
+        buffer = io.BytesIO()
+        with self.assertRaisesRegex(SerializeError, "not supported by default"):
+            torch.export.save(ep, buffer)
 
 
 if __name__ == "__main__":

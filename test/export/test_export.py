@@ -823,7 +823,11 @@ class TestExport(TestCase):
                 vmapped = torch.vmap(f)(x, y)
                 return vmapped.sum(dim=0)
 
-        ep = export(VmapToAssert(), (torch.zeros(4, 4, 4, 4), torch.zeros(4, 4, 4, 4)))
+        # See comment in test_vmap for why this context manager is needed.
+        with torch.export.unsafe_export_save_load():
+            ep = export(
+                VmapToAssert(), (torch.zeros(4, 4, 4, 4), torch.zeros(4, 4, 4, 4))
+            )
         exported = ep.module()(torch.ones(4, 4, 4, 4), torch.ones(4, 4, 4, 4))
         eager = VmapToAssert()(torch.ones(4, 4, 4, 4), torch.ones(4, 4, 4, 4))
         self.assertEqual(exported, eager)
@@ -3756,7 +3760,11 @@ graph():
         DYN = torch.export.Dim.DYNAMIC
         inputs = (torch.tensor([1.0, 2.0, 3.0]), torch.tensor([0.1, 0.2, 0.3]))
         dynamic = {"x": {0: DYN}, "y": {0: DYN}}
-        ep = torch.export.export(Vmap(), inputs, {}, dynamic_shapes=dynamic)
+        # vmap produces predispatch callable nodes that require unsafe_export_save_load
+        # for serialization. The context manager is needed here so that when test_serdes
+        # replaces export() with a mock that calls save/load, the flag is active.
+        with torch.export.unsafe_export_save_load():
+            ep = torch.export.export(Vmap(), inputs, {}, dynamic_shapes=dynamic)
         self.assertExpectedInline(
             str(ep.graph).strip(),
             """\
@@ -3776,9 +3784,10 @@ graph():
     %sum_2 : [num_users=1] = call_function[target=torch.ops.aten.sum.dim_IntList](args = (%_remove_batch_dim, [0]), kwargs = {})
     return (sum_2,)""",
         )
-        ep = torch.export.export(
-            Vmap(), inputs, {}, dynamic_shapes=dynamic, strict=True
-        )
+        with torch.export.unsafe_export_save_load():
+            ep = torch.export.export(
+                Vmap(), inputs, {}, dynamic_shapes=dynamic, strict=True
+            )
         self.assertExpectedInline(
             str(ep.graph).strip(),
             """\
@@ -3799,7 +3808,10 @@ graph():
     return (sum_2,)""",
         )
         self.assertTrue(torch.allclose(ep.module()(*inputs), Vmap()(*inputs)))
-        ep = export(Vmap(), inputs, {}, dynamic_shapes=dynamic).run_decompositions({})
+        with torch.export.unsafe_export_save_load():
+            ep = export(Vmap(), inputs, {}, dynamic_shapes=dynamic).run_decompositions(
+                {}
+            )
         self.assertTrue(torch.allclose(ep.module()(*inputs), Vmap()(*inputs)))
 
     @testing.expectedFailureLegacyExportNonStrict  # Old export doesn't work with subclasses

@@ -35,6 +35,11 @@ enable_auto_functionalized_v2_for_export = not is_fbcode()
 
 use_legacy_dynamo_graph_capture = True
 
+# Allow serialization/deserialization of arbitrary Python callables
+# (e.g. predispatch wrappers like JVP/vmap). No backwards compatibility
+# guarantee. Use torch.export.unsafe_export_save_load() to enable.
+allow_unsafe_callable_serialization = False
+
 
 if TYPE_CHECKING:
     from torch.utils._config_typing import *  # noqa: F403

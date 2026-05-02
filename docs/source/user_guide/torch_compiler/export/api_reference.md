@@ -18,6 +18,8 @@
 
 .. autofunction:: torch.export.load
 
+.. autofunction:: torch.export.unsafe_export_save_load
+
 .. autofunction:: torch.export.pt2_archive._package.package_pt2
 
 .. autofunction:: torch.export.pt2_archive._package.load_pt2

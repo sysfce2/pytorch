@@ -30,6 +30,7 @@ __all__ = [
     "ModuleCallSignature",
     "register_dataclass",
     "save",
+    "unsafe_export_save_load",
     "ShapesCollection",
     "unflatten",
     "UnflattenedModule",
@@ -432,6 +433,9 @@ def load(
         ep = deserialize(artifact, expected_opset_version)
 
         return ep
+
+
+from torch._export.serde import unsafe_export_save_load as unsafe_export_save_load
 
 
 def draft_export(

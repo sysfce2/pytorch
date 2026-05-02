@@ -25,6 +25,7 @@ from typing import Annotated, Any, cast, final, Optional
 import sympy
 
 import torch
+import torch._export.config as _export_config
 import torch.export.exported_program as ep
 from torch._export.non_strict_utils import _enable_graph_inputs_of_type_nn_module
 from torch._export.verifier import load_verifier
@@ -1022,8 +1023,13 @@ class GraphModuleSerializer(metaclass=Final):
                 metadata=self.serialize_metadata(node),
             )
         elif callable(node.target):
-            # Handle predispatch wrapper functions (vmap, JVP, etc.) that appear
-            # as plain Python function call_function nodes in pre_dispatch graphs.
+            if not _export_config.allow_unsafe_callable_serialization:
+                raise SerializeError(
+                    f"Serializing callable {node.target} is not supported by default. "
+                    "Use torch.export.unsafe_export_save_load() context manager to "
+                    "enable serialization of arbitrary Python callables (no backwards "
+                    "compatibility guarantee)."
+                )
             ex_node = Node(
                 name=node.name,
                 target=self.serialize_operator(node.target),
@@ -2711,7 +2717,12 @@ class GraphModuleDeserializer(metaclass=Final):
             )
             self.deserialize_outputs(serialized_node, fx_node)
         elif callable(target):
-            # Handle predispatch wrapper functions (vmap, JVP, etc.)
+            if not _export_config.allow_unsafe_callable_serialization:
+                raise SerializeError(
+                    f"Deserializing callable {target} is not supported by default. "
+                    "Use torch.export.unsafe_export_save_load() context manager to "
+                    "enable deserialization of arbitrary Python callables."
+                )
             args, kwargs = self.deserialize_hoo_inputs(serialized_node.inputs)
             name = serialized_node.name if serialized_node.name else None
             fx_node = self.graph.create_node(
