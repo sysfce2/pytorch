@@ -9,6 +9,7 @@ import torch.fx.experimental._config as _fx_experimental_config
 import torch.utils._pytree as pytree
 from torch._dynamo.decorators import mark_static, mark_unbacked, maybe_mark_dynamic
 from torch._dynamo.dynamic_spec import (
+    AnySpec,
     DictSpec,
     IntSpec,
     IntSpecType,
@@ -1158,162 +1159,13 @@ class TestObjectSpecCompile(TestCase):
         self.assertEqual(len(free_unbacked_symbols(shape[0])), 0)
 
 
-class TestObjectSpecMatch(TestCase):
-    """``ObjectSpec.match(obj)`` auto-derives a default spec scaffold
-    matching ``obj``'s structure."""
+class TestAnySpec(TestCase):
+    """``AnySpec`` placeholder. ``match`` / ``resolve`` land with the
+    integration layer that consumes them; for now this only smoke-tests
+    construction and ``repr``."""
 
-    def test_match_tensor(self):
-        x = torch.randn(2, 3, 4)
-        spec = ObjectSpec.match(x)
-        self.assertIsInstance(spec, TensorSpec)
-        self.assertEqual(spec._dim, 3)
-        # All dims default-policy.
-        for i in range(3):
-            self.assertIsNone(spec[i])
-
-    def test_match_int(self):
-        spec = ObjectSpec.match(5)
-        self.assertIsInstance(spec, IntSpec)
-        self.assertIs(spec._type, IntSpecType.STATIC)
-
-    def test_match_bool_rejected(self):
-        with self.assertRaisesRegex(TypeError, "bool"):
-            ObjectSpec.match(True)
-
-    def test_match_dict(self):
-        result = ObjectSpec.match({"x": torch.randn(2, 3), "n": 4})
-        self.assertIsInstance(result, DictSpec)
-        self.assertIsInstance(result["x"], TensorSpec)
-        self.assertEqual(result["x"]._dim, 2)
-        self.assertIsInstance(result["n"], IntSpec)
-
-    def test_match_list_and_tuple_preserve_type(self):
-        as_list = ObjectSpec.match([torch.randn(2), torch.randn(3, 4)])
-        self.assertIsInstance(as_list, list)
-        self.assertEqual(as_list[0]._dim, 1)
-        self.assertEqual(as_list[1]._dim, 2)
-
-        as_tuple = ObjectSpec.match((torch.randn(2),))
-        self.assertIsInstance(as_tuple, tuple)
-        self.assertEqual(as_tuple[0]._dim, 1)
-
-    def test_match_nn_module(self):
-        # Single-level module: parameters become attr-keyed TensorSpec
-        # entries; the result mirrors the module's attribute layout.
-        class Linear(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.randn(4, 3))
-                self.bias = torch.nn.Parameter(torch.randn(4))
-
-        spec = ObjectSpec.match(Linear())
-        self.assertIsInstance(spec, ObjectSpec)
-        self.assertIn("weight", spec)
-        self.assertIn("bias", spec)
-        self.assertEqual(spec["weight"]._dim, 2)
-        self.assertEqual(spec["bias"]._dim, 1)
-
-    def test_match_nested_nn_module(self):
-        # Nested module: child modules nest as ObjectSpec under .attr;
-        # parameters of the outer module appear alongside.
-        class Inner(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.randn(4, 3))
-
-        class Outer(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.inner = Inner()
-                self.bias = torch.nn.Parameter(torch.randn(4))
-
-        spec = ObjectSpec.match(Outer())
-        self.assertIsInstance(spec["inner"], ObjectSpec)
-        self.assertIsInstance(spec["inner"]["weight"], TensorSpec)
-        self.assertIsInstance(spec["bias"], TensorSpec)
-
-    def test_match_nn_module_with_buffer(self):
-        class WithBuffer(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.randn(2))
-                self.register_buffer("running_mean", torch.zeros(2))
-
-        spec = ObjectSpec.match(WithBuffer())
-        self.assertIn("weight", spec)
-        self.assertIn("running_mean", spec)
-        self.assertEqual(spec["running_mean"]._dim, 1)
-
-    def test_match_unknown_type_rejected(self):
-        with self.assertRaisesRegex(TypeError, "cannot derive a spec for"):
-            ObjectSpec.match("not a spec source")
-
-    def test_match_tensor_repr(self):
-        spec = ObjectSpec.match(torch.randn(2, 3))
-        self.assertEqual(repr(spec), "TensorSpec([None, None])")
-
-    def test_match_int_repr(self):
-        # ``match`` produces an anonymous ``IntSpec.static()`` whose
-        # auto-generated ``_name`` is process-dependent; check structure
-        # instead of an exact repr.
-        spec = ObjectSpec.match(5)
-        self.assertIsInstance(spec, IntSpec)
-        self.assertIs(spec._type, IntSpecType.STATIC)
-
-    def test_match_dict_repr(self):
-        # ``match`` produces a ``DictSpec`` containing an anonymous
-        # ``IntSpec`` whose auto-name is process-dependent; structural
-        # check on the leaves rather than exact repr.
-        result = ObjectSpec.match({"x": torch.randn(2), "n": 4})
-        self.assertIsInstance(result, DictSpec)
-        self.assertEqual(repr(result["x"]), "TensorSpec([None])")
-        self.assertIsInstance(result["n"], IntSpec)
-        self.assertIs(result["n"]._type, IntSpecType.STATIC)
-
-    def test_match_list_repr(self):
-        result = ObjectSpec.match([torch.randn(2), torch.randn(3, 4)])
-        self.assertEqual(
-            repr(result),
-            "[TensorSpec([None]), TensorSpec([None, None])]",
-        )
-
-    def test_match_nn_module_repr(self):
-        class Linear(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.randn(4, 3))
-                self.bias = torch.nn.Parameter(torch.randn(4))
-
-        spec = ObjectSpec.match(Linear())
-        self.assertEqual(
-            repr(spec),
-            "ObjectSpec({"
-            ".weight: TensorSpec([None, None]), "
-            ".bias: TensorSpec([None])"
-            "})",
-        )
-
-    def test_match_nested_nn_module_repr(self):
-        class Inner(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.randn(4, 3))
-
-        class Outer(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.inner = Inner()
-                self.bias = torch.nn.Parameter(torch.randn(4))
-
-        spec = ObjectSpec.match(Outer())
-        self.assertEqual(
-            repr(spec),
-            "ObjectSpec({"
-            ".inner: ObjectSpec({"
-            ".weight: TensorSpec([None, None])}), "
-            ".bias: TensorSpec([None])"
-            "})",
-        )
+    def test_repr(self):
+        self.assertEqual(repr(AnySpec()), "AnySpec()")
 
 
 class TestDictSpec(TestCase):

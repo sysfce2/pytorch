@@ -2263,7 +2263,9 @@ class VariableBuilder:
                 lookup_spec_from_dynamo_source,
             )
 
-            int_spec = lookup_spec_from_dynamo_source(self.source, config._shapes_spec)
+            int_spec = lookup_spec_from_dynamo_source(
+                self.source, config._shapes_spec, example_value=value
+            )
             if isinstance(int_spec, IntSpec):
                 if int_spec._type is IntSpecType.STATIC:
                     self.install_guards(GuardBuilder.CONSTANT_MATCH)
@@ -3995,7 +3997,7 @@ def _automatic_dynamic(
         TensorSpec,
     )
 
-    spec = lookup_spec_from_dynamo_source(source, config._shapes_spec)
+    spec = lookup_spec_from_dynamo_source(source, config._shapes_spec, example_value=e)
     tensor_spec = spec if isinstance(spec, TensorSpec) else None
 
     for i in range(e.dim()):
