@@ -497,17 +497,20 @@ class UserDefinedClassVariable(UserDefinedVariable):
     ) -> VariableTracker:
         """Handle descriptors found in cls.__mro__."""
         if isinstance(cls_attr, staticmethod):
-            return VariableTracker.build(tx, cls_attr.__get__(self.value), source)
+            sm_vt = variables.StaticMethodVariable(cls_attr, source=source)
+            return sm_vt.tp_descr_get_impl(tx, self, name)
 
         if isinstance(cls_attr, classmethod):
             if isinstance(cls_attr.__func__, property):
                 fget_vt = VariableTracker.build(tx, cls_attr.__func__.fget)
                 return fget_vt.call_function(tx, [self], {})
+            # cm_descr_get with obj=NULL uses type directly.
+            # https://github.com/python/cpython/blob/3.13/Objects/funcobject.c#L1224-L1226
             return variables.UserMethodVariable(cls_attr.__func__, self, source=source)
 
         if isinstance(cls_attr, types.ClassMethodDescriptorType):
-            func = cls_attr.__get__(None, self.value)
-            return VariableTracker.build(tx, func, source)
+            cmd_vt = variables.ClassMethodDescriptorVariable(cls_attr, source=source)
+            return cmd_vt.tp_descr_get_impl(tx, self, name)
 
         # property and _tuplegetter accessed on the class return the
         # descriptor itself (descriptor.__get__(None, cls) is descriptor).
@@ -521,6 +524,10 @@ class UserDefinedClassVariable(UserDefinedVariable):
         if name in cmp_name_to_op_mapping and not isinstance(
             cls_attr, types.FunctionType
         ):
+            # wrapperdescr_get with obj=NULL returns the descriptor itself.
+            # https://github.com/python/cpython/blob/3.13/Objects/descrobject.c#L206-L207
+            if isinstance(cls_attr, types.WrapperDescriptorType):
+                return variables.WrapperDescriptorVariable(cls_attr, source=source)
             return variables.GetAttrVariable(
                 self, name, py_type=type(cls_attr), source=source
             )
@@ -557,6 +564,14 @@ class UserDefinedClassVariable(UserDefinedVariable):
                 )
             ):
                 return VariableTracker.build(tx, cls_attr, source)
+            # wrapperdescr_get/method_get with obj=NULL returns the
+            # descriptor itself.
+            # https://github.com/python/cpython/blob/3.13/Objects/descrobject.c#L206-L207
+            # https://github.com/python/cpython/blob/3.13/Objects/descrobject.c#L140-L141
+            if isinstance(cls_attr, types.WrapperDescriptorType):
+                return variables.WrapperDescriptorVariable(cls_attr, source=source)
+            if isinstance(cls_attr, types.MethodDescriptorType):
+                return variables.MethodDescriptorVariable(cls_attr, source=source)
             return variables.GetAttrVariable(self, name, type(cls_attr), source=source)
 
         # Everything else: FunctionType, etc.
@@ -2575,24 +2590,31 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         if isinstance(type_attr, property) and not self._is_c_defined_property(
             type_attr
         ):
-            # Python property — trace fget directly.
+            # Python property -- trace fget via __get__.
             if self.source:
                 source = AttrSource(self.get_source_by_walking_mro(tx, name), "fget")
-            fget_vt = VariableTracker.build(
-                tx, type_attr.fget, source=source, realize=True
-            )
-            return fget_vt.call_function(tx, [self], {})
+            prop_vt = variables.PropertyVariable(type_attr, source=source)
+            return prop_vt.tp_descr_get_impl(tx, self, name)
 
         get_fn = inspect.getattr_static(type(type_attr), "__get__", None)
         if isinstance(get_fn, types.FunctionType):
             # User-defined data descriptor with a Python __get__.
             return self.invoke_descriptor_get(tx, name, type_attr, source)
 
-        # C-level data descriptor (property with C fget, member/getset
-        # descriptors, Cython attrs, etc.) — resolve via
-        # object.__getattribute__ which is side-effect free.
-        # Uninitialized slots raise AttributeError which must be surfaced
-        # as ObservedAttributeError so dynamo's try/except tracing works.
+        # C-level data descriptors -- resolve via __get__ which routes to
+        # tp_descr_get_impl. Uninitialized slots raise AttributeError which
+        # is surfaced as ObservedAttributeError so dynamo's try/except
+        # tracing works.
+        if isinstance(type_attr, types.MemberDescriptorType):
+            md_vt = variables.MemberDescriptorVariable(type_attr, source=source)
+            return md_vt.tp_descr_get_impl(tx, self, name)
+
+        if isinstance(type_attr, types.GetSetDescriptorType):
+            gs_vt = variables.GetSetDescriptorVariable(type_attr, source=source)
+            return gs_vt.tp_descr_get_impl(tx, self, name)
+
+        # Remaining C-level data descriptors (C-defined property, Cython
+        # attrs, _tuplegetter, etc.) -- resolve via __getattribute__.
         try:
             resolved = type(self.value).__getattribute__(self.value, name)
         except AttributeError:
@@ -2624,32 +2646,27 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         can_use_mro_source = self.cls_source is not None and self.source is not None
 
         if isinstance(type_attr, staticmethod):
-            # type_attr is the raw staticmethod wrapper from cls.__dict__
-            # (not the unwrapped function).  We call __get__ to unwrap it,
-            # but the *source* must go through __func__ on the descriptor
-            # (not the resolved function) because the guard needs to watch
-            # the descriptor object in the class dict, not the result.
+            # Source goes through __func__ on the descriptor so the guard
+            # watches the descriptor in the class dict, not the result.
             if can_use_mro_source:
                 source = AttrSource(
                     self.get_source_by_walking_mro(tx, name), "__func__"
                 )
-            func = type_attr.__get__(self.value)
-            return VariableTracker.build(tx, func, source)
+            sm_vt = variables.StaticMethodVariable(type_attr, source=source)
+            return sm_vt.tp_descr_get_impl(tx, self, name)
         elif isinstance(type_attr, classmethod):
             source_fn = None
             if can_use_mro_source:
                 source_fn = AttrSource(
                     self.get_source_by_walking_mro(tx, name), "__func__"
                 )  # type: ignore[assignment]
-            return variables.UserMethodVariable(
-                type_attr.__func__,
-                self.var_getattr(tx, "__class__"),
-                source_fn=source_fn,
-                source=source,
+            cm_vt = variables.ClassMethodVariable(
+                type_attr, source_fn=source_fn, source=source
             )
+            return cm_vt.tp_descr_get_impl(tx, self, name)
         elif isinstance(type_attr, types.ClassMethodDescriptorType):
-            func = type_attr.__get__(self.value, None)
-            return VariableTracker.build(tx, func, source)
+            cmd_vt = variables.ClassMethodDescriptorVariable(type_attr, source=source)
+            return cmd_vt.tp_descr_get_impl(tx, self, name)
         elif is_lru_cache_wrapped_function(type_attr):
             return variables.WrapperUserMethodVariable(
                 type_attr, "__wrapped__", self, source=source
@@ -2699,6 +2716,15 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                 if wrapped is not None:
                     traceable_fn = wrapped.__torch_dynamo_polyfill__
                     return variables.UserMethodVariable(traceable_fn, self)
+            if isinstance(type_attr, types.WrapperDescriptorType):
+                wd_vt = variables.WrapperDescriptorVariable(type_attr, source=source)
+                return wd_vt.tp_descr_get_impl(tx, self, name)
+            # method_get with an instance calls PyCFunction_NewEx to produce
+            # a bound builtin_function_or_method.
+            # https://github.com/python/cpython/blob/3.13/Objects/descrobject.c#L137-L159
+            if isinstance(type_attr, types.MethodDescriptorType):
+                md_vt = variables.MethodDescriptorVariable(type_attr, source=source)
+                return md_vt.tp_descr_get_impl(tx, self, name)
             return variables.GetAttrVariable(self, name, type(type_attr), source=source)
 
         # Plain class variable (or MethodType, C-level non-data descriptor
